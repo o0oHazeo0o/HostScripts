@@ -1,0 +1,282 @@
+#VMWare VCenter server
+$VCS = "VCENTER.FOO.COM"
+
+#VMWare hosts array
+$Hosts = @("ESX01.FOO.COM","ESX02.FOO.COM")
+
+#Server list array
+$Servers = @("SERVER01.FOO.COM","SERVER02.FOO.COM","SERVER03.FOO.COM")
+
+#Services array
+$Services = @("SERVICE1","SERVICE2","SERVICE3")
+
+#Mail info
+$SMTPAddress = "smtp.foo.com"
+$ToAddress = "usergroup@foo.com"
+$FromAddress = "serviceaccount@foo.com"
+
+#Set your disk warning thresholds 
+$PercentWarning = 5.00
+
+#Export data to HTML path & file name
+$HTMLDest = "$Env:USERPROFILE\Downloads\Logs\SSM$(get-date -format MMddyyHHmmss).html"
+
+#Clean up old log files older that one year once a day
+$LogPath = "$Env:USERPROFILE\Downloads\Logs\"
+$OutputPath = "$Env:USERPROFILE\Downloads\Logs\CleanupLog$(get-date -format MMddyyHHmmss).log"
+$MaxDaysToKeep = -365
+$ItemsToDelete = Dir $LogPath -Recurse -File * | Where {$_.LastWriteTime -lt (Get-Date).AddDays($MaxDaysToKeep)}
+
+[int]$hour = get-date -format HHmm
+If($hour -gt 500 -and $hour -lt 530)
+    {
+        If ($ItemsToDelete.Count -gt 0) 
+            { 
+                ForEach ($Item in $ItemsToDelete) 
+                    { 
+                        "$($Item.BaseName) is older than $((Get-Date).AddDays($MaxDaysToKeep)) and will be deleted" | Add-Content $OutputPath 
+                
+                        Get-ChildItem $LogPath -Recurse -Force | Where {$_.LastWriteTime -lt (Get-Date).AddDays($MaxDaysToKeep)} | %{Remove-Item $_.fullname -Include * -Recurse -Force}
+                    } 
+            }
+        ELSE{ 
+            "No items to be deleted today $($(Get-Date).DateTime)" | Add-Content $OutputPath 
+            }
+    }
+
+#HTML table style
+$Style = "<Style>
+            BODY{font-family:arial;font-size: 9pt;color:#154360;}
+            TABLE{border-width: 1px;border-style: solid;border-color: #000000;border-collapse: collapse;table-layout: fixed;width: 50%;margin-left: auto;margin-right: auto;}
+            TH{border-width:1px;padding:1px;border-style: solid;border-color: #000000;background-color:#3498DB;}
+            TD{border-width:1px;padding:1px;border-style: solid;border-color: #000000;text-align: center;}
+            TR:Nth-child(Odd) {Background-color:FFFFFF;}
+            TR:Nth-child(Even) {Background-color:#AED6F1;}
+            H1,H3,H4,H5,H6{font-size: 15pt;margin:0;padding:5px;}
+            H2{font-size: 10pt;margin:0;padding:5px;}
+            </Style>"
+
+# Create Headers
+$VMWareHostStatus = @"
+<H1 align=center>VMWare Host Resource Stats</H1>
+"@
+
+$ServerStatus = @"
+<H3 align=center>Server Resource Stats</H3>
+"@
+
+$DiskStatus = @"
+<H4 align=center>Server Disk Status</H4>
+"@
+
+$ServiceStatus = @"
+<H5 align=center>Service Status</H5>
+"@
+
+#Service restart counter 
+$SRVCCount = 0
+
+#Disk restart counter 
+$DSKCount = 0
+
+#Add PowerCLI PSSnapins
+Add-pssnapin vmw* -ErrorAction SilentlyContinue
+Get-command -Module vmware.vimautomation.core | Format-Wide -Column 3
+
+#Connect to VMWare server
+Connect-VIServer -Server $VCS -ErrorAction SilentlyContinue
+
+#Create host array var
+$Allhosts = @()
+
+# Pull VMWare Host Resources
+Foreach($VMHost in $Hosts)
+    {
+        $Hoststat = "" | Select HostName, MemoryInstalled, MemoryAllocated, MemoryConsumed, MemoryUsage, CPUMax, CPUAvg, CPUMin
+        $Hoststat.HostName = ($VMHost)
+  
+        $Statcpu = Get-Stat -Entity ($VMHost)-start (get-date).AddDays(-7) -Finish (Get-Date)-MaxSamples 10000 -stat cpu.usage.average
+        $Statmemconsumed = Get-Stat -Entity ($VMHost)-start (get-date).AddDays(-7) -Finish (Get-Date)-MaxSamples 10000 -stat mem.consumed.average
+        $Statmemusage = Get-Stat -Entity ($VMHost)-start (get-date).AddDays(-7) -Finish (Get-Date)-MaxSamples 10000 -stat mem.usage.average
+        $Statmemallocated = Get-VMhost ($VMHost) | Select @{N="allocated";E={$_ | Get-VM | %{$_.MemoryGB} | Measure-Object -Sum | Select -ExpandProperty Sum}}
+        $Statmeminstalled = Get-VMHost ($VMHost) | select MemoryTotalGB
+        $Statmeminstalled = $Statmeminstalled.MemoryTotalGB
+
+        $CPU = $Statcpu | Measure-Object -Property value -Average -Maximum -Minimum
+        $Memconsumed = $Statmemconsumed | Measure-Object -Property value -Average
+        $Memusage = $Statmemusage | Measure-Object -Property value -Average
+  
+        $CPUMax = "{0:N0}" -f ($CPU.Maximum)
+        $CPUAvg = "{0:N0}" -f ($CPU.Average)
+        $CPUMin = "{0:N0}" -f ($CPU.Minimum)
+        $Allocated = "{0:N0}" -f ($Statmemallocated.allocated)
+        $Consumed = "{0:N0}" -f ($Memconsumed.Average/1024/1024)
+        $Usage = "{0:P0}" -f ($Memusage.Average/100)
+        $Installed = "{0:N0}" -f ($Statmeminstalled)
+
+        $CPUMax = $CPUMax.ToString() + " %"
+        $CPUAvg = $CPUAvg.ToString() + " %"
+        $CPUMin = $CPUMin.ToString() + " %"
+        $MemoryInstalled = $Installed.ToString() + " GB"
+        $MemoryAllocated = $Allocated.ToString() + " GB"
+        $MemoryConsumed = $Consumed.ToString() + " GB"
+        $MemoryUsage = $Usage.ToString()
+
+        $Hoststat.CPUMax = $CPUMax
+        $Hoststat.CPUAvg = $CPUAvg
+        $Hoststat.CPUMin = $CPUMin
+        $Hoststat.MemoryInstalled = $MemoryInstalled
+        $Hoststat.MemoryAllocated = $MemoryAllocated
+        $Hoststat.MemoryConsumed = $MemoryConsumed
+        $Hoststat.MemoryUsage = $MemoryUsage
+        $Allhosts = $Hoststat | Select @{Name="CPU Max (%)";Expression={$CPUMax}},@{Name="CPU Avg (%)";Expression={$CPUAvg}},@{Name="CPU Min (%)";Expression={$CPUMin}},@{Name="Mem Installed (GB)";Expression={$MemoryInstalled}},@{Name="Mem Allocated (GB)";Expression={$MemoryAllocated}},@{Name="Mem Consumed (GB)";Expression={$MemoryConsumed}},@{Name="Memory Used (%)";Expression={$MemoryUsage}}
+
+        $VMWareHostStatus += $Allhosts | ConvertTo-Html -Fragment -PreContent "<H2 align=center>$VMHost</H2>" | Out-String
+    }
+
+#Close connection to VCenter server       
+Disconnect-VIServer -Server * -Force -Confirm:$false -ErrorAction SilentlyContinue
+
+#Pull server resource data
+Foreach ($Server in $Servers)
+    {
+        #Get CPU data
+        $CPUAverage = Get-WmiObject -computer $Server -class win32_processor | Measure-Object -property LoadPercentage -Average | Select-Object -ExpandProperty Average
+        $CPUMIN = Get-WmiObject -computer $Server -class win32_processor | Measure-Object -property LoadPercentage -Minimum | Select-Object -ExpandProperty Minimum
+        $CPUMAX = Get-WmiObject -computer $Server -class win32_processor | Measure-Object -property LoadPercentage -Maximum | Select-Object -ExpandProperty Maximum
+
+        #Get MEM data
+        $System = Get-WmiObject win32_OperatingSystem -ComputerName $Server
+        $TotalPhysicalMem = [math]::Round($System.TotalVisibleMemorySize/1mb,2)
+        $FreePhysicalMem = [math]::Round($system.FreePhysicalMemory/1mb,2)
+        $UsedPhysicalMem = ($TotalPhysicalMem - $FreePhysicalMem)
+        $UsedPhysicalMemPct = [math]::Round(($UsedPhysicalMem / $TotalPhysicalMem) * 100,1)
+
+        #Create array for hardware data
+        $HWArr = New-Object Object
+        $HWArr | Add-Member NoteProperty 'Server' -Value $Server
+        $HWArr | Add-Member NoteProperty 'CPU Average (%)' -Value $CPUAverage
+        $HWArr | Add-Member NoteProperty 'CPU Min (%)' -Value $CPUMIN
+        $HWArr | Add-Member NoteProperty 'CPU Max (%)'-Value $CPUMAX
+        $HWArr | Add-Member NoteProperty 'Total Mem (GB)' -Value $TotalPhysicalMem
+        $HWArr | Add-Member NoteProperty 'Free Mem (GB)' -Value $FreePhysicalMem
+        $HWArr | Add-Member NoteProperty 'Consumed Mem (GB)' -Value $UsedPhysicalMem
+        $HWArr | Add-Member NoteProperty 'Consumed Mem (%)' -Value $UsedPhysicalMemPct
+        $HWArr
+
+        #Get HDD storage data
+        $DiskSpace = Get-WmiObject -ComputerName $Server -Namespace root\cimv2 -Query "Select * from Win32_LogicalDisk where DriveType=3"
+            $DSKSP = $DiskSpace | ForEach-Object {
+                New-Object PSObject -Property @{
+                        'Drive Name' = $_.DeviceID
+                        'Total Space (GB)' = [Math]::Round($_.Size / 1GB, 2)
+                        'Used Space (GB)' = [Math]::Round(($_.Size - $_.FreeSpace) / 1GB, 2)
+                        'Free Space (GB)' = [Math]::Round($_.FreeSpace / 1GB, 2)
+                        'Free Space (%)' = [Math]::Round(100 * $_.FreeSpace / $_.Size, 2)
+                                                }
+                                            }
+
+        #Create disk warning if disk free space is less than precent warning
+        If($DSKSP.'Free Space (%)' -lt $PercentWarning)
+            {
+                $DiskWarningStatusHeader = @"
+"<H6 align=center>Server Disk Under 5% Free Warnings</H6>"
+"@
+                $DiskWarning += $DSKSP | Select-Object 'Drive Name','Total Space (GB)','Used Space (GB)','Free Space (GB)','Free Space (%)' | ConvertTo-Html -PreContent "<H2 align=center>$Server</H2>" | Out-String
+                
+                #Create e-mail body for servers that need disk space checked
+                $DSKEmailBody += "Check disk space on $Server" | Out-String
+
+                $DSKCount++
+            }
+
+        #Create hardware and disk varible for HTML output
+        $ServerStatus += $HWArr | Select-Object 'CPU Max (%)','CPU Average (%)','CPU Min (%)','Total Mem (GB)','Free Mem (GB)','Consumed Mem (GB)','Consumed Mem (%)' | ConvertTo-Html -Fragment -PreContent "<H2 align=center>$Server</H2>" | Out-String
+        $DiskStatus += $DSKSP | Select-Object 'Drive Name','Total Space (GB)','Used Space (GB)','Free Space (GB)','Free Space (%)' | ConvertTo-Html -Fragment -PreContent "<H2 align=center>$Server</H2>" | Out-String
+        $DiskWarningStatus = $DiskWarning
+
+        Foreach ($Service in $Services)
+            {
+                
+                #Verify that service exist on server
+                If (Get-Service -ComputerName $Server -Name $Service -ErrorAction SilentlyContinue)
+                    {                                                            
+                        "`n"
+                        "$Service Exists on $Server"
+                        "`n"
+                        Write-Output "Checking Status of $Service..."
+                        "`n"
+                        
+                        #Get server service status
+                        $SRVCArr = Get-Service -ComputerName $Server -Name $Services -ErrorAction SilentlyContinue
+                        $SRVC = $SRVCArr | ForEach-Object {
+                        New-Object PSObject -Property @{
+                        'Service Name'= $_.Name
+                        'Service Status'= $_.Status
+                                                        }
+                                                    }
+
+                        #If service is not running, start the service, and add to counter
+                        If ($SRVC.'Service Status' -ne "Running")
+                            {
+                                Get-Service -Name $Service -ComputerName $Server | Set-Service -Status Running
+                                
+                                #Create new array for services that needed to be restarted
+                                $SRVCRS = New-Object psobject
+                                $SRVCRS | Add-Member -MemberType NoteProperty -Name "Server" -Value "$Server"
+                                $SRVCRS | Add-Member -MemberType NoteProperty -Name "Service" -Value "$Service"
+                                $SVEMSR = $SRVCRS.Server
+                                $SVEMSV = $SRVCRS.Service
+
+                                #Create e-mail body for services that were restarted
+                                $SRVCEmailBody += "$SVEMSV had to be restarted on $SVEMSR" | Out-String
+                                 
+                                $SRVCCount++
+                            }
+                        
+                        #If service is running, display status
+                        If ($SRVC.'Service Status' -eq "Running")
+                            {
+                                Write-Output "$Service Service is already started"
+                                "`n"
+                            }
+                    }
+                            
+                #If the services does not exist on the server, display result
+                Else {"$Service does not exist on $Server"}
+            }
+
+        #Create service varible for HTML output
+        $ServiceStatus += $SRVC | Select-Object 'Service Name','Service Status' | ConvertTo-Html -Fragment -PreContent "<H2 align=center>$Server</H2>" | Out-String
+        
+        #Service HTML background color replacement if service is in a stopped state
+        $SRVCHTMLCLRTB = @{Stopped = ' bgcolor="#ff0000">Stopped<';}
+        $SRVCHTMLCLRTB.Keys | ForEach {$ServiceStatus = $ServiceStatus -replace ">$_<",($SRVCHTMLCLRTB.$_)}
+    }
+   
+#Convert data to HTML and write to file
+ConvertTo-Html -Head $Style -Body $VMWareHostStatus,$ServerStatus,$DiskWarningStatusHeader,$DiskWarningStatus,$DiskStatus,$ServiceStatus | Out-File $HTMLDest
+
+#If service count is less than or equal to 0, output/email everything is fine
+If (($SRVCCount -eq 0) -and ($DSKCount -eq 0))
+    {
+        Send-MailMessage -SMTPServer $SMTPAddress -To $ToAddress -From $FromAddress -Subject “Server Status: Good” -Body ("All disks are good, and all servers services are running as intended..." | Out-String)
+        Write-Output "`r`n All servers services are running as intended..."
+    }
+
+#If service count is greater than 0, output/email check server services
+If (($SRVCCount -gt 0) -and ($DSKCount -eq 0))
+    {
+        Send-MailMessage -SMTPServer $SMTPAddress -To $ToAddress -From $FromAddress -Subject “Server Status: Bad” -Body ($SRVCEmailBody | Out-String)
+    }
+
+#If disk count is greater than 0, output/email check server services
+If (($DSKCount -gt 0) -and ($SRVCCount -eq 0))
+    {
+        Send-MailMessage -SMTPServer $SMTPAddress -To $ToAddress -From $FromAddress -Subject “Server Status: Bad” -Body ($DSKEmailBody | Out-String)
+    }
+
+If (($DSKCount -gt 0) -and ($SRVCCount -gt 0))
+    {
+        Send-MailMessage -SMTPServer $SMTPAddress -To $ToAddress -From $FromAddress -Subject “Server Status: Bad” -Body ($SRVCEmailBody + "`n" + $DSKEmailBody | Out-String)
+    }
